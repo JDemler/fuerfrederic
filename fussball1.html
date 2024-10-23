@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <style>
+    #gameCanvas {
+      border: 2px solid #333;
+      background: #4CAF50;
+    }
+    .controls {
+      margin-top: 20px;
+      font-family: Arial, sans-serif;
+    }
+    .btn {
+      padding: 10px 20px;
+      background: #2196F3;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .btn:hover {
+      background: #1976D2;
+    }
+    .stats {
+      margin-top: 10px;
+      font-size: 18px;
+      font-family: Arial, sans-serif;
+    }
+
+    /* Neue mobile Styles */
+    @media (max-width: 800px) {
+      #gameCanvas {
+        width: 100%;
+        height: auto;
+        touch-action: none; /* Verhindert Zoom und Scroll auf Touch-Geräten */
+      }
+      .controls {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+      }
+      .btn {
+        width: 200px;
+        height: 50px; /* Größere Touch-Fläche */
+        margin: 5px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" width="800" height="400"></canvas>
+  <div class="controls">
+    <button id="shootBtn" class="btn">Schießen!</button>
+    <button id="resetBtn" class="btn">Reset</button>
+    <div class="stats">
+      Tore: <span id="score">0</span>
+      Versuche: <span id="attempts">0</span>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const shootBtn = document.getElementById('shootBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const scoreElement = document.getElementById('score');
+    const attemptsElement = document.getElementById('attempts');
+
+    let score = 0;
+    let attempts = 0;
+
+    // Physik-Konstanten
+    const GRAVITY = 0.6;  // Erhöhte Schwerkraft (war vorher 0.5)
+    const AIR_RESISTANCE = 0.999999999999;  // Verstärkte Luftreibung (war vorher 0.99)
+
+    let ball = {
+      x: 50,
+      y: canvas.height - 30,
+      radius: 10,
+      speedX: 0,  // Separate Geschwindigkeiten für X und Y
+      speedY: 0,
+      isMoving: false
+    };
+
+    // Ersetze die defenders-Definition mit drei Gegenspielern
+    const defenders = [
+      {
+        x: canvas.width * 0.3,
+        y: canvas.height - 50,
+        width: 20,
+        height: 40,
+        speed: 2,
+        direction: 1,
+        moveRange: 80
+      },
+      {
+        x: canvas.width * 0.5,
+        y: canvas.height - 50,
+        width: 20,
+        height: 40,
+        speed: 2,
+        direction: -1,
+        moveRange: 100
+      },
+      {
+        x: canvas.width * 0.7,
+        y: canvas.height - 50,
+        width: 20,
+        height: 40,
+        speed: 2,
+        direction: 1,
+        moveRange: 120
+      }
+    ];
+
+    const goal = {
+      x: canvas.width - 80,
+      y: canvas.height - 120,
+      width: 20,
+      height: 120
+    };
+
+    let mouseX = 0;
+    let mouseY = 0;
+    let powerGauge = 0;
+    let isPowerCharging = false;
+
+    function drawBall() {
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+      ctx.fillStyle = 'white';
+      ctx.fill();
+      ctx.strokeStyle = 'black';
+      ctx.stroke();
+      ctx.closePath();
+    }
+
+    function drawDefenders() {
+      defenders.forEach(defender => {
+        // Körper
+        const randomColor = `rgb(${Math.floor(Math.random() * 256)}, ${Math.floor(Math.random() * 256)}, ${Math.floor(Math.random() * 256)})`;
+        ctx.fillStyle = randomColor;
+        ctx.fillRect(defender.x, defender.y, defender.width, defender.height);
+
+        // Trikot-Details
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(defender.x + 5, defender.y + 10, defender.width - 10, 5);
+
+        // Kopf
+        ctx.beginPath();
+        ctx.arc(defender.x + defender.width/2, defender.y - 10, 10, 0, Math.PI * 2);
+        ctx.fillStyle = '#FFD700';
+        ctx.fill();
+        ctx.stroke();
+      });
+    }
+
+    function updateDefenders() {
+      defenders.forEach(defender => {
+        defender.y += defender.speed * defender.direction;
+        const startY = canvas.height - 50;
+        if (Math.abs(defender.y - startY) > defender.moveRange) {
+          defender.direction *= -1;
+        }
+      });
+    }
+
+    function checkCollisionWithDefenders() {
+      return defenders.some(defender => {
+        return ball.x + ball.radius > defender.x &&
+               ball.x - ball.radius < defender.x + defender.width &&
+               ball.y + ball.radius > defender.y &&
+               ball.y - ball.radius < defender.y + defender.height;
+      });
+    }
+
+    function drawGoal() {
+      ctx.fillStyle = 'white';
+      ctx.fillRect(goal.x, goal.y, goal.width, goal.height);
+
+      ctx.strokeStyle = '#ccc';
+      for(let i = 0; i < goal.height; i += 10) {
+        ctx.beginPath();
+        ctx.moveTo(goal.x, goal.y + i);
+        ctx.lineTo(goal.x + goal.width, goal.y + i);
+        ctx.stroke();
+      }
+      for(let i = 0; i < goal.width; i += 10) {
+        ctx.beginPath();
+        ctx.moveTo(goal.x + i, goal.y);
+        ctx.lineTo(goal.x + i, goal.y + goal.height);
+        ctx.stroke();
+      }
+    }
+
+    function drawAimLine() {
+      if (!ball.isMoving) {
+        ctx.beginPath();
+        ctx.moveTo(ball.x, ball.y);
+        const lineLength = powerGauge * 2;
+        const angleToMouse = Math.atan2(mouseY - ball.y, mouseX - ball.x);
+        ctx.lineTo(
+          ball.x + Math.cos(angleToMouse) * lineLength,
+          ball.y + Math.sin(angleToMouse) * lineLength
+        );
+        ctx.strokeStyle = `rgba(255, 0, 0, ${powerGauge/100})`;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.lineWidth = 1;
+
+        // Flugbahn-Vorschau
+        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.setLineDash([5, 5]);
+        let previewX = ball.x;
+        let previewY = ball.y;
+        let previewSpeedX = (powerGauge / 10) * Math.cos(angleToMouse);
+        let previewSpeedY = (powerGauge / 10) * Math.sin(angleToMouse);
+
+        ctx.moveTo(previewX, previewY);
+        for(let i = 0; i < 10; i++) {
+          previewX += previewSpeedX;
+          previewY += previewSpeedY;
+          previewSpeedY += GRAVITY;
+          ctx.lineTo(previewX, previewY);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
+    function drawPowerMeter() {
+      if (isPowerCharging) {
+        ctx.fillStyle = `rgba(255, ${255 - powerGauge * 2.55}, 0, 0.7)`;
+        ctx.fillRect(10, 10, powerGauge * 2, 20);
+        ctx.strokeStyle = 'black';
+        ctx.strokeRect(10, 10, 200, 20);
+      }
+    }
+
+    function drawField() {
+      ctx.beginPath();
+      ctx.arc(canvas.width/2, canvas.height - 20, 50, 0, Math.PI * 2);
+      ctx.strokeStyle = 'white';
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(canvas.width/2, 0);
+      ctx.lineTo(canvas.width/2, canvas.height);
+      ctx.stroke();
+
+      ctx.strokeRect(canvas.width - 150, canvas.height - 150, 150, 150);
+    }
+
+    function update() {
+      if (ball.isMoving) {
+        // Getrennte Aktualisierung für X- und Y-Geschwindigkeit
+        ball.x += ball.speedX;
+        ball.y += ball.speedY;
+
+        // Schwerkraft auf Y-Geschwindigkeit anwenden
+        ball.speedY += GRAVITY;
+
+        // Luftreibung auf beide Geschwindigkeiten anwenden
+        ball.speedX *= AIR_RESISTANCE;
+        ball.speedY *= AIR_RESISTANCE;
+
+        // Kollision mit Boden
+        if (ball.y > canvas.height - ball.radius) {
+          ball.y = canvas.height - ball.radius;
+          ball.speedY = -ball.speedY * 0.7;  // Verringerter Aufpralleffekt
+          ball.speedX *= 0.9;  // Reibung am Boden
+        }
+
+        // Kollision mit Verteidigern
+        if (checkCollisionWithDefenders()) {
+          ball.speedX *= -0.5;
+          setTimeout(resetBall, 500);
+        }
+
+        // Torkollision prüfen
+        if (ball.x > goal.x && ball.x < goal.x + goal.width &&
+            ball.y > goal.y && ball.y < goal.y + goal.height) {
+          score++;
+          scoreElement.textContent = score;
+          // Erhöhe die Geschwindigkeit aller Verteidiger
+          defenders.forEach(defender => {
+            defender.speed += 0.5; // Erhöhe die Geschwindigkeit um 0.5 pro Tor
+          });
+          resetBall();
+        }
+
+        // Ball stoppen wenn zu langsam
+        if (Math.abs(ball.speedX) < 0.1 && Math.abs(ball.speedY) < 0.1 &&
+            ball.y > canvas.height - ball.radius - 1) {
+          resetBall();
+        }
+
+        // Ball außerhalb
+        if (ball.x > canvas.width || ball.x < 0) {
+          resetBall();
+        }
+      }
+
+      updateDefenders();
+    }
+
+    function resetBall() {
+      ball.x = 50;
+      ball.y = canvas.height - 30;
+      ball.speedX = 0;
+      ball.speedY = 0;
+      ball.isMoving = false;
+      isPowerCharging = false;
+      powerGauge = 0;
+    }
+
+    function createNewDefender() {
+      // Zufällige Position zwischen 30% und 85% der Spielfeldbreite
+      const xPos = canvas.width * (0.3 + Math.random() * 0.55);
+      return {
+        x: xPos,
+        y: canvas.height - 50,
+        width: 20,
+        height: 40,
+        speed: 2 + Math.random() * 3, // Zufällige Geschwindigkeit zwischen 2 und 5
+        direction: Math.random() < 0.5 ? 1 : -1, // Zufällige Startrichtung
+        moveRange: 80 + Math.random() * 40 // Zufälliger Bewegungsbereich
+      };
+    }
+
+    function gameLoop() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawField();
+      drawGoal();
+      drawDefenders();
+      drawBall();
+      drawAimLine();
+      drawPowerMeter();
+      update();
+      requestAnimationFrame(gameLoop);
+    }
+
+    canvas.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      mouseX = e.clientX - rect.left;
+      mouseY = e.clientY - rect.top;
+    });
+
+    canvas.addEventListener('mousedown', () => {
+      if (!ball.isMoving) {
+        isPowerCharging = true;
+        powerGauge = 0;
+        const powerInterval = setInterval(() => {
+          if (isPowerCharging && powerGauge < 100) {
+            powerGauge += 2;
+          } else {
+            clearInterval(powerInterval);
+          }
+        }, 20);
+      }
+    });
+
+    canvas.addEventListener('mouseup', () => {
+      if (isPowerCharging) {
+        attempts++;
+        attemptsElement.textContent = attempts;
+
+        const angleToMouse = Math.atan2(mouseY - ball.y, mouseX - ball.x);
+        ball.speedX = (powerGauge / 10) * Math.cos(angleToMouse);
+        ball.speedY = (powerGauge / 10) * Math.sin(angleToMouse);
+        ball.isMoving = true;
+        isPowerCharging = false;
+      }
+    });
+
+    resetBtn.addEventListener('click', () => {
+      if (ball.isMoving) {
+        resetBall();
+      }
+    });
+
+    // Touch-Events für mobile Geräte
+    canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault(); // Verhindert Standardverhalten
+      if (!ball.isMoving) {
+        const touch = e.touches[0];
+        const rect = canvas.getBoundingClientRect();
+        mouseX = touch.clientX - rect.left;
+        mouseY = touch.clientY - rect.top;
+
+        isPowerCharging = true;
+        powerGauge = 0;
+        const powerInterval = setInterval(() => {
+          if (isPowerCharging && powerGauge < 100) {
+            powerGauge += 2;
+          } else {
+            clearInterval(powerInterval);
+          }
+        }, 20);
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      if (!ball.isMoving) {
+        const touch = e.touches[0];
+        const rect = canvas.getBoundingClientRect();
+        mouseX = touch.clientX - rect.left;
+        mouseY = touch.clientY - rect.top;
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      if (isPowerCharging) {
+        attempts++;
+        attemptsElement.textContent = attempts;
+
+        const angleToMouse = Math.atan2(mouseY - ball.y, mouseX - ball.x);
+        ball.speedX = (powerGauge / 10) * Math.cos(angleToMouse);
+        ball.speedY = (powerGauge / 10) * Math.sin(angleToMouse);
+        ball.isMoving = true;
+        isPowerCharging = false;
+      }
+    }, { passive: false });
+
+    // Anpassung der Canvas-Größe für verschiedene Bildschirmgrößen
+    function resizeCanvas() {
+      const container = canvas.parentElement;
+      const maxWidth = Math.min(800, container.clientWidth);
+      const aspectRatio = canvas.height / canvas.width;
+
+      canvas.style.width = maxWidth + 'px';
+      canvas.style.height = (maxWidth * aspectRatio) + 'px';
+    }
+
+    // Initial und bei Größenänderung aufrufen
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    gameLoop();
+  </script>
+</body>
+</html>
