@@ -46,7 +46,8 @@
         <div id="hud"></div>
         <div class="controls">
             Controls:<br>
-            ↑ - Thrust<br>
+            ↑ - Engine On/Off<br>
+            Shift/Ctrl - Throttle Up/Down<br>
             ← → - Rotate<br>
             R - Reset
         </div>
@@ -74,6 +75,7 @@
         const FUEL_MASS = 9.0;   // Starting fuel mass (tons)
         const FUEL_CONSUMPTION = 0.01; // Fuel consumed per frame (tons/frame)
         const EXHAUST_VELOCITY = 45.0; // Exhaust velocity (scaled for gameplay, roughly like a chemical rocket)
+        const THROTTLE_CHANGE_RATE = 0.01; // How fast throttle changes per frame
 
         // Generate terrain points around the Earth
         const terrainPoints = [];
@@ -111,9 +113,11 @@
                 y: groundPos.y,
                 velX: 0,
                 velY: 0,
-                rotation: -Math.PI / 2,  // Pointing straight up
+                rotation: -Math.PI / 2,
+                engineOn: false,    // New property for engine state
                 thrusting: false,
                 fuel: FUEL_MASS,
+                throttle: 0.2,      // Start with 20% throttle setting
                 get mass() {
                     return EMPTY_MASS + this.fuel;
                 }
@@ -297,19 +301,29 @@
 
             const onGround = distance <= groundRadius + 15; // 15 is rocket height
 
-            // Handle thrust
-            rocket.thrusting = keys['ArrowUp'] && rocket.fuel > 0;
+            // Handle throttle
+            if (keys['Shift']) {
+                rocket.throttle = Math.min(1.0, rocket.throttle + THROTTLE_CHANGE_RATE);
+            } else if (keys['Control']) {
+                rocket.throttle = Math.max(0.0, rocket.throttle - THROTTLE_CHANGE_RATE);
+            }
+
+            // Handle engine on/off
+            rocket.engineOn = keys['ArrowUp'];
+            rocket.thrusting = rocket.engineOn && rocket.throttle > 0 && rocket.fuel > 0;
+
             if (rocket.thrusting) {
                 // Thrust = mass flow rate * exhaust velocity
-                const thrust = FUEL_CONSUMPTION * EXHAUST_VELOCITY;
+                const currentFuelConsumption = FUEL_CONSUMPTION * rocket.throttle;
+                const thrust = currentFuelConsumption * EXHAUST_VELOCITY;
                 // F = ma, so acceleration = F/m
                 const acceleration = thrust / rocket.mass;
 
                 rocket.velX += Math.cos(rocket.rotation) * acceleration;
                 rocket.velY += Math.sin(rocket.rotation) * acceleration;
 
-                // Consume fuel
-                rocket.fuel = Math.max(0, rocket.fuel - FUEL_CONSUMPTION);
+                // Consume fuel based on throttle
+                rocket.fuel = Math.max(0, rocket.fuel - currentFuelConsumption);
 
                 // Add immediate lift-off velocity when starting from ground
                 if (onGround) {
@@ -579,12 +593,14 @@
         // Add this new helper function:
         function getOrbitalStatusText(orbitalStatus) {
             const fuelPercentage = (rocket.fuel / FUEL_MASS * 100).toFixed(1);
-            const thrust = FUEL_CONSUMPTION * EXHAUST_VELOCITY;
+            const currentFuelConsumption = FUEL_CONSUMPTION * rocket.throttle;
+            const thrust = currentFuelConsumption * EXHAUST_VELOCITY;
             const weight = G * EARTH_MASS * rocket.mass / (EARTH_RADIUS * EARTH_RADIUS);
             const thrustToWeight = thrust / weight;
 
             let text = `⛽ Fuel: ${fuelPercentage}%<br>` +
                        `⚖️ Mass: ${rocket.mass.toFixed(1)}t<br>` +
+                       `🎮 Throttle: ${(rocket.throttle * 100).toFixed(0)}%<br>` +
                        `🚀 TWR: ${thrustToWeight.toFixed(2)}<br>`;
 
 
