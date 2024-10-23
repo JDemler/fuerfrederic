@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background: #000;
+            font-family: Arial, sans-serif;
+        }
+        #gameContainer {
+            position: relative;
+        }
+        #canvas {
+            border: 2px solid #333;
+            background: black;
+        }
+        #hud {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: monospace;
+        }
+        .controls {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: white;
+        }
+        #minimap {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            border: 2px solid #333;
+            background: rgba(0, 0, 0, 0.8);
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <canvas id="canvas" width="800" height="600"></canvas>
+        <div id="hud"></div>
+        <div class="controls">
+            Controls:<br>
+            ↑ - Thrust<br>
+            ← → - Rotate<br>
+            R - Reset
+        </div>
+        <canvas id="minimap" width="150" height="150"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const hud = document.getElementById('hud');
+        const minimapCanvas = document.getElementById('minimap');
+        const minimapCtx = minimapCanvas.getContext('2d');
+
+        // Constants
+        const G = 0.0001; // Gravitational constant (scaled for gameplay)
+        const EARTH_MASS = 1e11; // Mass of Earth (scaled for gameplay)
+        const THRUST = 0.15;
+        const ROTATION_SPEED = 0.05;
+        const EARTH_RADIUS = 16000;  // Doubled Earth size
+        const EARTH_CENTER_Y = EARTH_RADIUS + canvas.height - 100;
+        const TERRAIN_POINTS = 200;
+        const TERRAIN_ROUGHNESS = 100;
+        const ESCAPE_VELOCITY = Math.sqrt(2 * G * EARTH_MASS / EARTH_RADIUS);
+        const EMPTY_MASS = 1.0;  // Mass of rocket without fuel (tons)
+        const FUEL_MASS = 9.0;   // Starting fuel mass (tons)
+        const FUEL_CONSUMPTION = 0.01; // Fuel consumed per frame (tons/frame)
+        const EXHAUST_VELOCITY = 45.0; // Exhaust velocity (scaled for gameplay, roughly like a chemical rocket)
+
+        // Generate terrain points around the Earth
+        const terrainPoints = [];
+        for (let i = 0; i < TERRAIN_POINTS; i++) {
+            const angle = (i / TERRAIN_POINTS) * Math.PI * 2;
+            // Use perlin-like noise for terrain
+            const radiusVariation = Math.sin(angle * 4) * 30 +
+                                  Math.sin(angle * 8) * 20 +
+                                  Math.sin(angle * 15) * 10 +
+                                  Math.sin(angle * 30) * 5;
+            terrainPoints.push({
+                angle: angle,
+                radius: EARTH_RADIUS + radiusVariation
+            });
+        }
+
+        // Replace the initial rocket state and resetGame function with:
+        function getGroundPosition() {
+            // Find the angle straight up from the center
+            const angle = -Math.PI/2;
+            const index = Math.floor((angle + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2) * TERRAIN_POINTS);
+            const groundRadius = terrainPoints[index].radius;
+
+            return {
+                x: canvas.width / 2,  // Center horizontally
+                y: EARTH_CENTER_Y - groundRadius - 15  // On the ground (-15 for rocket height)
+            };
+        }
+
+        // Update the getGroundPosition function to include fuel and mass:
+        function getInitialRocketState() {
+            const groundPos = getGroundPosition();
+            return {
+                x: groundPos.x,
+                y: groundPos.y,
+                velX: 0,
+                velY: 0,
+                rotation: -Math.PI / 2,  // Pointing straight up
+                thrusting: false,
+                fuel: FUEL_MASS,
+                get mass() {
+                    return EMPTY_MASS + this.fuel;
+                }
+            };
+        }
+
+        // Update the initial rocket state:
+        let rocket = getInitialRocketState();
+
+        // Game state
+        let camera = {
+            x: 0,
+            y: 0,
+            zoom: 1,
+            targetZoom: 1
+        };
+
+        // Input handling
+        const keys = {};
+        document.addEventListener('keydown', (e) => {
+            keys[e.key] = true;
+            if (e.key === 'r') resetGame();
+        });
+        document.addEventListener('keyup', (e) => keys[e.key] = false);
+
+        // Update the resetGame function:
+        function resetGame() {
+            rocket = getInitialRocketState();
+            camera.x = 0;
+            camera.y = 0;
+        }
+
+        function checkTerrainCollision() {
+            const dx = rocket.x - canvas.width / 2;
+            const dy = rocket.y - EARTH_CENTER_Y;
+            const rocketAngle = Math.atan2(dy, dx);
+            const rocketDistance = Math.sqrt(dx * dx + dy * dy);
+
+            // Find the two closest terrain points
+            let closestIndex = Math.floor((rocketAngle + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2) * TERRAIN_POINTS);
+            closestIndex = (closestIndex + TERRAIN_POINTS) % TERRAIN_POINTS;
+            const nextIndex = (closestIndex + 1) % TERRAIN_POINTS;
+
+            // Interpolate between the points
+            const p1 = terrainPoints[closestIndex];
+            const p2 = terrainPoints[nextIndex];
+            const angleDiff = (rocketAngle - p1.angle + Math.PI * 4) % (Math.PI * 2);
+            const t = angleDiff / (Math.PI * 2 / TERRAIN_POINTS);
+            const interpolatedRadius = p1.radius * (1 - t) + p2.radius * t;
+
+            return rocketDistance < interpolatedRadius;
+        }
+
+        function calculateOrbitalParameters() {
+            const dx = rocket.x - canvas.width / 2;
+            const dy = rocket.y - EARTH_CENTER_Y;
+            const r = Math.sqrt(dx * dx + dy * dy);
+            const speed = Math.sqrt(rocket.velX * rocket.velX + rocket.velY * rocket.velY);
+
+            // Calculate specific orbital energy
+            const specificEnergy = (speed * speed / 2) - (G * EARTH_MASS / r);
+
+            // Calculate angular momentum per unit mass (specific angular momentum)
+            const angularMomentum = (dx * rocket.velY - dy * rocket.velX);
+
+            if (specificEnergy >= 0) {
+                return { type: "escape", speed, escapeVelocity: ESCAPE_VELOCITY };
+            }
+
+            // Calculate semi-major axis
+            const semiMajorAxis = -G * EARTH_MASS / (2 * specificEnergy);
+
+            // Calculate eccentricity using vis-viva equation
+            const eccentricity = Math.sqrt(1 + (2 * specificEnergy * angularMomentum * angularMomentum) /
+                                         (G * G * EARTH_MASS * EARTH_MASS));
+
+            // Determine if orbit is closed
+            if (eccentricity < 1) {
+                // Calculate periapsis and apoapsis from center of Earth
+                const periapsisRadius = semiMajorAxis * (1 - eccentricity);
+                const apoapsisRadius = semiMajorAxis * (1 + eccentricity);
+
+                // Convert to altitude above surface
+                const periapsis = periapsisRadius - EARTH_RADIUS;
+                const apoapsis = apoapsisRadius - EARTH_RADIUS;
+
+                // Check if orbit is actually stable (periapsis must be above Earth's surface)
+                if (periapsisRadius > EARTH_RADIUS) {
+                    return {
+                        type: "orbital",
+                        periapsis,
+                        apoapsis,
+                        eccentricity,
+                        semiMajorAxis,
+                        periapsisRadius,
+                        apoapsisRadius
+                    };
+                } else {
+                    return { type: "suborbital", speed };
+                }
+            } else {
+                return { type: "suborbital", speed };
+            }
+        }
+
+        // Add this new function after calculateOrbitalParameters():
+        function calculateOrbitPoints(orbitalStatus, intersectEarth = false) {
+
+            const points = [];
+            const centerX = canvas.width / 2;
+            const centerY = EARTH_CENTER_Y;
+
+            if (orbitalStatus.type === "orbital" || (orbitalStatus.type === "suborbital" && intersectEarth)) {
+                // Calculate orbit parameters using current position and velocity
+                const dx = rocket.x - centerX;
+                const dy = rocket.y - centerY;
+                const r = Math.sqrt(dx * dx + dy * dy);
+                const speed = Math.sqrt(rocket.velX * rocket.velX + rocket.velY * rocket.velY);
+                const angle = Math.atan2(dy, dx);
+
+                // Calculate specific angular momentum
+                const h = dx * rocket.velY - dy * rocket.velX;
+
+                // Calculate eccentricity vector components
+                const evX = (rocket.velY * h) / (G * EARTH_MASS) - dx / r;
+                const evY = (-rocket.velX * h) / (G * EARTH_MASS) - dy / r;
+                const ev = Math.sqrt(evX * evX + evY * evY);
+
+                // Calculate orbit orientation
+                const orientationAngle = Math.atan2(evY, evX);
+
+                // For a complete orbit or until Earth intersection
+                const steps = 100;
+                let maxAngle = Math.PI * 2;
+
+                if (intersectEarth && orbitalStatus.type === "suborbital") {
+                    // For suborbital trajectories, calculate intersection with Earth
+                    const a = orbitalStatus.semiMajorAxis;
+                    const c = a * ev;
+                    const b = Math.sqrt(Math.abs(a * a - c * c));
+
+                    // Find the true anomaly at Earth intersection
+                    const cosTheta = (EARTH_RADIUS - a * (1 - ev * ev)) / (ev * EARTH_RADIUS);
+                    if (!isNaN(cosTheta)) {
+                        maxAngle = Math.acos(cosTheta);
+                        if (maxAngle < 0) maxAngle += Math.PI * 2;
+                    }
+                }
+
+                for (let i = 0; i <= steps; i++) {
+                    const theta = (i / steps) * maxAngle - maxAngle/2;
+                    const orbitR = orbitalStatus.semiMajorAxis * (1 - ev * ev) /
+                                  (1 + ev * Math.cos(theta));
+
+                    if (orbitR > EARTH_RADIUS || orbitalStatus.type === "orbital") {
+                        const x = centerX + orbitR * Math.cos(theta + orientationAngle);
+                        const y = centerY + orbitR * Math.sin(theta + orientationAngle);
+                        points.push({x, y});
+                    }
+                }
+            }
+
+            return points;
+        }
+
+        function update() {
+            // Handle rotation
+            if (keys['ArrowLeft']) rocket.rotation -= ROTATION_SPEED;
+            if (keys['ArrowRight']) rocket.rotation += ROTATION_SPEED;
+
+            // Check if we're on the ground
+            const dx = rocket.x - canvas.width / 2;
+            const dy = rocket.y - EARTH_CENTER_Y;
+            const rocketAngle = Math.atan2(dy, dx);
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            // Get ground height at current position
+            let groundIndex = Math.floor((rocketAngle + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2) * TERRAIN_POINTS);
+            groundIndex = (groundIndex + TERRAIN_POINTS) % TERRAIN_POINTS;
+            const groundRadius = terrainPoints[groundIndex].radius;
+
+            const onGround = distance <= groundRadius + 15; // 15 is rocket height
+
+            // Handle thrust
+            rocket.thrusting = keys['ArrowUp'] && rocket.fuel > 0;
+            if (rocket.thrusting) {
+                // Thrust = mass flow rate * exhaust velocity
+                const thrust = FUEL_CONSUMPTION * EXHAUST_VELOCITY;
+                // F = ma, so acceleration = F/m
+                const acceleration = thrust / rocket.mass;
+
+                rocket.velX += Math.cos(rocket.rotation) * acceleration;
+                rocket.velY += Math.sin(rocket.rotation) * acceleration;
+
+                // Consume fuel
+                rocket.fuel = Math.max(0, rocket.fuel - FUEL_CONSUMPTION);
+
+                // Add immediate lift-off velocity when starting from ground
+                if (onGround) {
+                    rocket.velY -= 0.1;
+                }
+            }
+
+            // Apply gravity and update position if not on ground or if thrusting
+            if (!onGround || rocket.thrusting) {
+                const angle = Math.atan2(dy, dx);
+                const gravityStrength = G * EARTH_MASS / (distance * distance);
+                // Gravity is independent of rocket mass (galileo principle)
+                rocket.velX -= Math.cos(angle) * gravityStrength;
+                rocket.velY -= Math.sin(angle) * gravityStrength;
+
+                // Update position
+                rocket.x += rocket.velX;
+                rocket.y += rocket.velY;
+            } else {
+                // On ground and not thrusting: stop all movement
+                rocket.velX = 0;
+                rocket.velY = 0;
+                // Place exactly on ground
+                rocket.x = canvas.width / 2 + (groundRadius + 15) * Math.cos(rocketAngle);
+                rocket.y = EARTH_CENTER_Y + (groundRadius + 15) * Math.sin(rocketAngle);
+            }
+
+            // Update camera to follow rocket more smoothly
+            const targetCameraX = rocket.x - canvas.width / 2;
+            const targetCameraY = rocket.y - canvas.height / 2;
+            camera.x += (targetCameraX - camera.x) * 0.1;
+            camera.y += (targetCameraY - camera.y) * 0.1;
+
+            // Update camera zoom
+            camera.targetZoom = calculateTargetZoom();
+            camera.zoom += (camera.targetZoom - camera.zoom) * 0.1;
+
+            // Check for crash - only if we're moving
+            if (checkTerrainCollision() && (Math.abs(rocket.velX) > 0.1 || Math.abs(rocket.velY) > 0.1)) {
+                resetGame();
+            }
+        }
+
+        function draw() {
+            // Clear the canvas
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Save context for camera transform
+            ctx.save();
+
+            // Apply camera transform with zoom
+            ctx.translate(canvas.width/2, canvas.height/2);
+            ctx.scale(camera.zoom, camera.zoom);
+            ctx.translate(-canvas.width/2 - camera.x, -canvas.height/2 - camera.y);
+
+            // Draw stars (background)
+            for (let i = 0; i < 200; i++) {
+                ctx.fillStyle = '#fff';
+                const x = ((camera.x + i * 50) % 2000) + Math.sin(i) * 1000;
+                const y = ((camera.y + i * 50) % 1600) + Math.cos(i) * 800;
+                ctx.fillRect(x, y, 2, 2);
+            }
+
+            // Draw Earth with terrain
+            ctx.beginPath();
+            const centerX = canvas.width / 2;
+            const centerY = EARTH_CENTER_Y;
+
+            // Draw terrain
+            ctx.beginPath();
+            terrainPoints.forEach((point, i) => {
+                const x = centerX + Math.cos(point.angle) * point.radius;
+                const y = centerY + Math.sin(point.angle) * point.radius;
+                if (i === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            });
+            ctx.closePath();
+
+            // Create gradient for Earth
+            const gradient = ctx.createRadialGradient(
+                centerX, centerY, EARTH_RADIUS - TERRAIN_ROUGHNESS,
+                centerX, centerY, EARTH_RADIUS + TERRAIN_ROUGHNESS
+            );
+            gradient.addColorStop(0, '#004d99');  // Deeper blue
+            gradient.addColorStop(0.5, '#0066cc'); // Medium blue
+            gradient.addColorStop(1, '#0080ff');   // Lighter blue
+
+            ctx.fillStyle = gradient;
+            ctx.fill();
+
+            // Add some surface detail
+            ctx.strokeStyle = '#0099ff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Draw orbit
+            drawOrbit(ctx);
+
+            // Draw rocket
+            ctx.save();
+            ctx.translate(rocket.x, rocket.y);
+            ctx.rotate(rocket.rotation);
+
+            // Rocket body
+            ctx.fillStyle = '#silver';
+            ctx.beginPath();
+            ctx.moveTo(-15, -15);
+            ctx.lineTo(30, 0);
+            ctx.lineTo(-15, 15);
+            ctx.closePath();
+            ctx.fillStyle = '#fff';
+            ctx.fill();
+            ctx.strokeStyle = '#888';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Draw thrust
+            if (rocket.thrusting) {
+                ctx.beginPath();
+                ctx.moveTo(-15, 0);
+                ctx.lineTo(-30, -8);
+                ctx.lineTo(-35, 0);
+                ctx.lineTo(-30, 8);
+                ctx.fillStyle = '#f50';
+                ctx.fill();
+            }
+
+            ctx.restore();
+            ctx.restore();
+
+            if (lastFrameTime) {
+                // Update HUD
+                const currentTime = performance.now();
+                const deltaTime = currentTime - lastFrameTime;
+                fps = Math.round(1000 / deltaTime);
+                lastFrameTime = currentTime;
+            }
+
+            const orbitalStatus = calculateOrbitalParameters();
+            const speed = Math.sqrt(rocket.velX * rocket.velX + rocket.velY * rocket.velY);
+            const altitude = Math.sqrt((rocket.x - canvas.width / 2) ** 2 +
+                                     (rocket.y - EARTH_CENTER_Y) ** 2) - EARTH_RADIUS;
+
+            // Update main HUD
+            hud.innerHTML = `FPS: ${fps}<br>` +
+                            `Speed: ${(speed * 100).toFixed(1)} m/s<br>` +
+                            `Altitude: ${formatAltitude(altitude)}<br><br>` +
+                            `Orbital Status:<br>` +
+                            `${getOrbitalStatusText(orbitalStatus)}`;
+
+            // Draw minimap
+            function drawMinimap() {
+                minimapCtx.fillStyle = '#000';
+                minimapCtx.fillRect(0, 0, minimapCanvas.width, minimapCanvas.height);
+
+                const scale = minimapCanvas.width / (EARTH_RADIUS * 3);
+                const centerX = minimapCanvas.width / 2;
+                const centerY = minimapCanvas.height / 2;
+
+                // Draw Earth
+                minimapCtx.beginPath();
+                minimapCtx.arc(centerX, centerY, EARTH_RADIUS * scale, 0, Math.PI * 2);
+                minimapCtx.fillStyle = '#0066cc';
+                minimapCtx.fill();
+
+                // Draw predicted orbit if in stable orbit
+                const orbitalStatus = calculateOrbitalParameters();
+                if (orbitalStatus.type === "orbital") {
+                    minimapCtx.beginPath();
+
+                    // Calculate orbit parameters
+                    const dx = rocket.x - canvas.width / 2;
+                    const dy = rocket.y - EARTH_CENTER_Y;
+                    const r = Math.sqrt(dx * dx + dy * dy);
+                    const h = dx * rocket.velY - dy * rocket.velX;  // specific angular momentum
+
+                    // Calculate eccentricity vector components
+                    const evX = (rocket.velY * h) / (G * EARTH_MASS) - dx / r;
+                    const evY = (-rocket.velX * h) / (G * EARTH_MASS) - dy / r;
+                    const ev = Math.sqrt(evX * evX + evY * evY);  // eccentricity magnitude
+
+                    // Calculate semi-major axis
+                    const a = orbitalStatus.semiMajorAxis * scale;
+                    const c = a * ev;  // distance from center to focus
+                    const b = Math.sqrt(a * a - c * c);  // semi-minor axis
+
+                    // Calculate center of ellipse relative to Earth
+                    const centerOffsetX = -c * evX / ev;
+                    const centerOffsetY = -c * evY / ev;
+
+                    // Draw ellipse
+                    minimapCtx.save();
+                    minimapCtx.translate(centerX + centerOffsetX, centerY + centerOffsetY);
+
+                    // Calculate rotation angle from eccentricity vector
+                    const rotationAngle = Math.atan2(evY, evX);
+                    minimapCtx.rotate(rotationAngle);
+
+                    // Draw the ellipse
+                    minimapCtx.ellipse(0, 0, a, b, 0, 0, Math.PI * 2);
+                    minimapCtx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+                    minimapCtx.stroke();
+
+                    minimapCtx.restore();
+                }
+
+                // Draw rocket position
+                const rocketMapX = centerX + (rocket.x - canvas.width / 2) * scale;
+                const rocketMapY = centerY + (rocket.y - EARTH_CENTER_Y) * scale;
+                minimapCtx.fillStyle = '#fff';
+                minimapCtx.fillRect(rocketMapX - 2, rocketMapY - 2, 4, 4);
+            }
+
+            // Call drawMinimap() at the end of the main draw() function
+            drawMinimap();
+        }
+
+        // Update the draw function to include orbit visualization
+        // Add this before drawing the rocket, after drawing Earth:
+        function drawOrbit(ctx) {
+            const orbitalStatus = calculateOrbitalParameters();
+            const orbitPoints = calculateOrbitPoints(orbitalStatus, true);
+
+            if (orbitPoints.length > 1) {
+                ctx.beginPath();
+                ctx.moveTo(orbitPoints[0].x, orbitPoints[0].y);
+
+                for (let i = 1; i < orbitPoints.length; i++) {
+                    ctx.lineTo(orbitPoints[i].x, orbitPoints[i].y);
+                }
+
+                ctx.strokeStyle = orbitalStatus.type === "orbital" ?
+                    'rgba(0, 255, 0, 0.3)' : 'rgba(255, 0, 0, 0.3)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        }
+        // Add these variables after the camera state declaration:
+        let lastFrameTime = performance.now();
+        let fps = 0;
+
+
+        function gameLoop() {
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Start the game
+        gameLoop();
+
+
+        // Add this function after the normalizeAngle function:
+        function formatAltitude(meters) {
+            if (meters >= 1000000) {
+                return `${(meters/1000000).toFixed(2)}Mm`;
+            } else if (meters >= 1000) {
+                return `${(meters/1000).toFixed(1)}km`;
+            }
+            return `${meters.toFixed(0)}m`;
+        }
+
+        // Add this new helper function:
+        function getOrbitalStatusText(orbitalStatus) {
+            const fuelPercentage = (rocket.fuel / FUEL_MASS * 100).toFixed(1);
+            const thrust = FUEL_CONSUMPTION * EXHAUST_VELOCITY;
+            const weight = G * EARTH_MASS * rocket.mass / (EARTH_RADIUS * EARTH_RADIUS);
+            const thrustToWeight = thrust / weight;
+
+            let text = `⛽ Fuel: ${fuelPercentage}%<br>` +
+                       `⚖️ Mass: ${rocket.mass.toFixed(1)}t<br>` +
+                       `🚀 TWR: ${thrustToWeight.toFixed(2)}<br>`;
+
+
+            switch (orbitalStatus.type) {
+                case "escape":
+                    return text + `🚀 ESCAPE TRAJECTORY<br>` +
+                           `Speed: ${(orbitalStatus.speed * 100).toFixed(1)} m/s<br>` +
+                           `Escape Velocity: ${(orbitalStatus.escapeVelocity * 100).toFixed(1)} m/s`;
+                case "orbital":
+                    return text + `🛸 STABLE ORBIT<br>` +
+                           `Periapsis: ${formatAltitude(orbitalStatus.periapsis)}<br>` +
+                           `Apoapsis: ${formatAltitude(orbitalStatus.apoapsis)}<br>` +
+                           `Eccentricity: ${orbitalStatus.eccentricity.toFixed(3)}`;
+                case "suborbital":
+                    return text + `📉 SUBORBITAL<br>` +
+                           `Speed: ${(orbitalStatus.speed * 100).toFixed(1)} m/s`;
+            }
+        }
+
+        // Add this function after the camera state declaration
+        function calculateTargetZoom() {
+            const speed = Math.sqrt(rocket.velX * rocket.velX + rocket.velY * rocket.velY);
+            const altitude = Math.sqrt((rocket.x - canvas.width / 2) ** 2 +
+                                     (rocket.y - EARTH_CENTER_Y) ** 2) - EARTH_RADIUS;
+
+            // Base zoom on speed and altitude
+            const speedFactor = Math.max(1, speed * 100 / 500);  // Start zooming out at 500 m/s
+            const altitudeFactor = Math.max(1, altitude / 10000);  // Start zooming out at 10km
+
+            return Math.max(0.5, 1 / Math.max(speedFactor, altitudeFactor));
+        }
+    </script>
+</body>
+</html>
